@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+
+# dependencies
+# python3
+# xsel
+# requests
+
+import fcntl
+import json
+import os
+import os.path
+import readline
+import requests
+import signal
+import sys
+
+from actions import *
+
+HOME_DIR = os.path.expanduser('~')
+TODO_FILE = HOME_DIR + '/.todo'
+PID_FILE = HOME_DIR + '/todo.pid'
+PID_FILE_DESCRIPTOR = open(PID_FILE, 'r+')
+GITHUB_API = 'https://api.github.com/gists'
+
+# Generate the payload for a POST request
+# for uploading to Github
+def generate_payload():
+    global todo
+    with open(TODO_FILE) as f:
+        file_dump = f.read()
+    return {
+        "description": "TODO list",
+        "files": {
+            "todo.txt": {
+                "content": file_dump
+            }
+        }
+    }
+
+def make_post_request():
+    payload = generate_payload()
+    data = json.dumps(payload)
+    response = requests.post(GITHUB_API, data=data)
+    return response
+
+def parse_response(response):
+    if response.status_code != 200:
+        print(r.text)
+        return
+
+    text = response.text
+    response_dict = json.loads(text)
+    return response_dict["html_url"]
+
+def acquire_lock():
+    try:
+        fcntl.lockf(PID_FILE_DESCRIPTOR, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError as err:
+        print('error: another instance of this program is already running', file=sys.stderr)
+        exit(1)
+
+def release_lock():
+    fcntl.lockf(PID_FILE_DESCRIPTOR, fcntl.LOCK_UN)
+
+def input_with_prefill(prompt, text):
+    def hook():
+        readline.insert_text(text)
+        readline.redisplay()
+    readline.set_pre_input_hook(hook)
+    try:
+        result = input(prompt)
+    except EOFError:
+        return None
+    finally:
+        readline.set_pre_input_hook()
+    return result
+
+def pop_readline_history():
+    current_history_length = readline.get_current_history_length()
+    readline.remove_history_item(current_history_length - 1)
+
+def show_help():
+    print('''    + <String> - Add a TODO entry
+    - <Int> - Delete the entry
+    e <Int> - Edit an entry
+    c <Int> - Add an entry to the clipboard
+    ?, h - Show help
+    q - Quit''')
+
+def show_todo():
+    print('\n------------------------------\n')
+    print('Current TODO list\n')
+    for idx, item in enumerate(todo):
+        print(idx, item)
+
+def save_to_disk():
+    global todo
+    print('Saving to disk...',)
+    with open(TODO_FILE, 'w') as f:
+        for item in todo:
+            f.write(item)
+            f.write('\n')
+    print('done')
+
+def create_if_doesnt_exist(filename):
+    if not os.path.isfile(filename):
+        with open(filename, 'w') as f:
+            pass
+
+def read_from_disk():
+    create_if_doesnt_exist(TODO_FILE)
+    with open(TODO_FILE, 'r') as f:
+        lines = f.readlines()
+        return [line.strip() for line in lines]
+
+def exit_cleanly():
+    save_to_disk()
+    print('Exiting')
+    release_lock()
+    os.system("clear")
+    exit(0)
+
+# TODO: this should account for all kinds of changes
+# not just additions
+def undo_last():
+    global history
+    history.pop()
+    todo = history[-1]
+
+def upload_todo():
+    global todo
+    make_post_request()
+
+def handle_input(s):
+    global todo
+    os.system("clear")
+    if s[0] in ['?', 'h']:
+        show_help()
+    elif s[0] == '+':
+        add_item(s, todo)
+    elif s[0] == '-':
+        delete_item(s, todo)
+    elif s[0] == 'c':
+        copy_to_clipboard(s, todo)
+    elif s[0] == 'e':
+        edit_item(s, todo)
+    elif s[0] == '/':
+        search(s, todo)
+    elif s[0] == 'g':
+        upload_todo()
+    elif s[0] == 'u':
+        undo_last(todo)
+    elif s[0] == 's':
+        swap_items(s, todo)
+    elif s[0] == 'q':
+        exit_cleanly()
+
+def sigint_handler(signal, frame):
+    print
+    exit_cleanly()
+
+if __name__ == '__main__':
+    os.system("clear")
+    acquire_lock()
+
+    signal.signal(signal.SIGINT, sigint_handler)
+    todo = read_from_disk()
+
+    show_help()
+    while True:
+        show_todo()
+        print
+        try:
+            inp = input("command: ")
+        except EOFError:
+            exit_cleanly()
+        print()
+        handle_input(inp)
